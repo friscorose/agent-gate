@@ -40,6 +40,12 @@ agent-gate $VERSION — agents push branches to a bot repo; only you merge into 
 Agents get the bot's credential only. For Claude Code: run 'agent-gate env' and,
 in that shell, 'claude' then '/web-setup'.
   agent-gate env      Print the export line that selects the bot's gh login.
+
+  agent-gate install [DIR]
+        Run from a clone of agent-gate: copy this script to DIR (default ~/.local/bin)
+        and remember the clone for 'update'.
+  agent-gate update
+        Fast-forward the remembered clone from its origin and reinstall.
 EOF
 }
 
@@ -297,6 +303,34 @@ cmd_land() {
   ok "landed $br"
 }
 
+# ---------------------------------------------------------------- install / update
+SRC_FILE="$CONF_DIR/source"      # path of the clone the installed copy came from
+cmd_install() {
+  local dest=${1:-$HOME/.local/bin} self src
+  self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+  src=$(git -C "$(dirname "$self")" rev-parse --show-toplevel 2>/dev/null) \
+    || die "install: run it from a clone of agent-gate (./agent-gate install)"
+  [[ $self == "$src/agent-gate" ]] || die "install: run the clone's own copy: $src/agent-gate install"
+  install -d "$dest" && install -m 755 "$self" "$dest/agent-gate"
+  install -d -m 700 "$CONF_DIR" && printf '%s\n' "$src" >"$SRC_FILE"
+  ok "installed $dest/agent-gate ($(git -C "$src" describe --always --dirty))"
+  ok "update source: $src"
+  case ":$PATH:" in *":$dest:"*) ;; *) say "note: $dest is not on PATH";; esac
+}
+cmd_update() {
+  need git
+  [[ -f $SRC_FILE ]] || die "update: no recorded clone; run './agent-gate install' from one first"
+  local src; src=$(<"$SRC_FILE")
+  git -C "$src" rev-parse --git-dir >/dev/null 2>&1 || die "update: $src is no longer a git clone"
+  [[ $(git -C "$src" symbolic-ref --short HEAD) == main ]] || die "update: $src is not on main"
+  [[ -z $(git -C "$src" status --porcelain --untracked-files=no) ]] || die "update: $src has local changes"
+  local before; before=$(git -C "$src" rev-parse --short HEAD)
+  git -C "$src" pull -q --ff-only origin main || die "update: cannot fast-forward $src; resolve it by hand"
+  if [[ $(git -C "$src" rev-parse --short HEAD) == "$before" ]]; then say "already current ($before)"
+  else git -C "$src" log --oneline "$before..HEAD"; fi
+  "$src/agent-gate" install "$(dirname "$(command -v agent-gate || echo "$HOME/.local/bin/agent-gate")")"
+}
+
 cmd_env() { load_conf; echo "export GH_CONFIG_DIR=$AG_GH_DIR"; }
 
 case ${1:-} in
@@ -306,6 +340,8 @@ case ${1:-} in
   review) shift; cmd_review "$@";;
   land)   shift; cmd_land "$@";;
   env)    shift; cmd_env "$@";;
+  install) shift; cmd_install "$@";;
+  update)  shift; cmd_update "$@";;
   -V|--version) echo "$VERSION";;
   ""|-h|--help|help) usage;;
   *) die "unknown command '$1' (see --help)";;
