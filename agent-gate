@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# agent-gate — review-gated AI agent commits on GitHub Free.
+# Commands: setup | repo | check | review | land.   See docs/GUIDE.md.
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+VERSION=0.1.0
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-gate"
+CONF="$CONF_DIR/config"
+
+die()  { printf 'agent-gate: %s\n' "$*" >&2; exit 1; }
+say()  { printf '  %s\n' "$*"; }
+ok()   { printf '  ok    %s\n' "$*"; }
+bad()  { printf '  FAIL  %s\n' "$*"; FAILS=$((FAILS+1)); }
+need() { for c in "$@"; do command -v "$c" >/dev/null || die "missing required command: $c"; done; }
+ask()  { local a; read -r -p "  $1 [y/N] " a; [[ $a == [yY]* ]]; }
+
+usage() {
+  cat <<EOF
+agent-gate $VERSION — agents push branches to a bot repo; only you merge into yours.
+
+  agent-gate setup --owner USER --bot BOTUSER [--alias HOST] [--key PATH]
+        One time. SSH key and host alias for the bot, separate gh login for the bot,
+        saves config to $CONF.
+  agent-gate repo [--public] [NAME]
+        In a git repo with a 'main' branch. Private (default): create <owner>/NAME and
+        <bot>/NAME, both private, the bot's not a fork. --public: create <owner>/NAME
+        public and fork it as the bot (pull-request route). Adds remotes 'origin' and
+        'bot', pushes main.
+  agent-gate check
+        Verify identities, the SSH alias and, inside a repo, remotes and gate invariants.
+  agent-gate review BRANCH
+        Fetch the bot repo and show what BRANCH would bring into main.
+  agent-gate land BRANCH [-m MSG] [--keep]
+        Merge bot/BRANCH into main (--no-ff), run AG_TEST_CMD if configured,
+        push main to origin and bot, delete the bot branch unless --keep.
+
+Agents get the bot's credential only. For Claude Code: run 'agent-gate env' and,
+in that shell, 'claude' then '/web-setup'.
+  agent-gate env      Print the export line that selects the bot's gh login.
+EOF
+}
+
+load_conf() {
+  [[ -f $CONF ]] || die "no config; run 'agent-gate setup' first"
+  # shellcheck source=/dev/null
+  . "$CONF"
+  : "${AG_OWNER:?}" "${AG_BOT:?}" "${AG_ALIAS:?}" "${AG_KEY:?}" "${AG_GH_DIR:?}"
+}
+gh_owner() { env -u GH_CONFIG_DIR gh "$@"; }
+gh_bot()   { GH_CONFIG_DIR="$AG_GH_DIR" gh "$@"; }
+login_of() { "$1" api user --jq .login 2>/dev/null || true; }
+ssh_greets() { { ssh -T -o BatchMode=yes "$AG_ALIAS" 2>&1 || true; } | sed -n 's/^Hi \([^!]*\)!.*/\1/p' | head -1; }
+# Repo name: from origin's URL when set (the local directory may be named differently).
+repo_name() {
+  local u; u=$(git config --get remote.origin.url || true)
+  if [[ -n $u ]]; then basename -s .git "$u"; else basename "$(git rev-parse --show-toplevel)"; fi
+}
+
+# ---------------------------------------------------------------- setup
+cmd_setup() {
+  need git gh ssh ssh-keygen
+  local owner="" bot="" alias="" key=""
+  while (($#)); do case $1 in
+    --owner) owner=$2; shift 2;; --bot) bot=$2; shift 2;;
+    --alias) alias=$2; shift 2;; --key) key=$2; shift 2;;
+    *) die "setup: unknown argument $1";; esac; done
+  [[ -n $owner && -n $bot ]] || die "setup needs --owner and --bot"
+  [[ $owner != "$bot" ]] || die "owner and bot must be different accounts"
+  alias=${alias:-github-$bot}; key=${key:-$HOME/.ssh/id_$bot}
+  local ghdir="${XDG_CONFIG_HOME:-$HOME/.config}/gh-$bot"
+
+  echo "1/5 SSH key: $key"
+  if [[ -f $key ]]; then say "exists, reusing"
+  else ssh-keygen -t ed25519 -f "$key" -C "$bot agent-gate"; fi
+
+  echo "2/5 SSH host alias: $alias"
+  local sshc="$HOME/.ssh/config"
+  if [[ -f $sshc ]] && grep -Eq "^[[:space:]]*Host[[:space:]]+(.*[[:space:]])?$alias([[:space:]]|\$)" "$sshc"; then
+    say "Host $alias already in $sshc; leaving it. It MUST contain 'IdentitiesOnly yes'."
+  else
+    [[ -f $sshc ]] && cp -p "$sshc" "$sshc.agent-gate.bak"
+    install -d -m 700 "$HOME/.ssh"
+    cat >>"$sshc" <<EOF
+
+# agent-gate: bot identity. IdentitiesOnly stops ssh-agent keys (yours) being offered first.
+Host $alias
+    User git
+    HostName github.com
+    IdentityFile $key
+    IdentitiesOnly yes
+    ForwardX11 no
+EOF
+    chmod 600 "$sshc"; say "appended (backup: $sshc.agent-gate.bak if a config existed)"
+  fi
+
+  echo "3/5 gh login for the BOT ($bot) in $ghdir"
+  say "Sign in as $bot (use a private browser window if your browser is signed in as $owner)."
+  say "--insecure-storage keeps the token in $ghdir: the system keyring is shared between"
+  say "gh config dirs and would let one identity answer for the other."
+  GH_CONFIG_DIR="$ghdir" gh auth login -h github.com -p ssh --skip-ssh-key \
+      -s workflow,admin:public_key --insecure-storage
+  local got; got=$(GH_CONFIG_DIR="$ghdir" gh api user --jq .login)
+  [[ $got == "$bot" ]] || die "bot login returned '$got', expected '$bot'. Log out of that dir and retry."
+
+  echo "4/5 Upload the public key to $bot"
+  local fp; fp=$(ssh-keygen -lf "$key.pub" | awk '{print $2}')
+  if GH_CONFIG_DIR="$ghdir" gh ssh-key list 2>/dev/null | grep -q "$(cut -d' ' -f2 "$key.pub")"; then
+    say "already registered ($fp)"
+  else
+    GH_CONFIG_DIR="$ghdir" gh ssh-key add "$key.pub" --title "agent-gate $(hostname)"
+  fi
+
+  echo "5/5 Save config"
+  install -d -m 700 "$CONF_DIR"
+  cat >"$CONF" <<EOF
+AG_OWNER=$owner
+AG_BOT=$bot
+AG_ALIAS=$alias
+AG_KEY=$key
+AG_GH_DIR=$ghdir
+# AG_TEST_CMD='make test'      # optional: run by 'land' on the merge result before committing
+EOF
+  say "$CONF"
+  echo
+  load_conf; FAILS=0; check_identities
+  echo
+  say "Next: inside your project, 'agent-gate repo'. Optional shell alias:"
+  say "  alias ghbot='GH_CONFIG_DIR=$ghdir gh'"
+}
+
+# ---------------------------------------------------------------- repo
+cmd_repo() {
+  need git gh; load_conf
+  local public=0 name=""
+  while (($#)); do case $1 in --public) public=1; shift;; -*) die "repo: unknown option $1";;
+    *) name=$1; shift;; esac; done
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git repository"
+  git rev-parse --verify -q main >/dev/null || die "no local 'main' branch"
+  name=${name:-$(repo_name)}
+  local own="$AG_OWNER/$name" bot="$AG_BOT/$name"
+  local url_o="git@github.com:$own.git" url_b="git@$AG_ALIAS:$bot.git"
+  local vis=--private; ((public)) && vis=--public
+
+  if gh_owner repo view "$own" >/dev/null 2>&1; then say "$own exists"
+  else gh_owner repo create "$own" "$vis" >/dev/null; ok "created $own (${vis#--})"; fi
+  set_remote origin "$url_o"
+  git push origin main          # a fork needs a non-empty parent
+
+  if gh_bot repo view "$bot" >/dev/null 2>&1; then say "$bot exists"
+  elif ((public)); then gh_bot repo fork "$own" --clone=false >/dev/null; ok "forked $own as $bot"
+  else gh_bot repo create "$bot" --private >/dev/null; ok "created $bot (private)"; fi
+  set_remote bot "$url_b"
+  ((public)) || git push bot main
+  echo; FAILS=0; check_repo
+}
+set_remote() {
+  local cur; cur=$(git config --get "remote.$1.url" || true)
+  if [[ -z $cur ]]; then git remote add "$1" "$2"; ok "remote $1 -> $2"
+  elif [[ $cur == "$2" ]]; then say "remote $1 already $2"
+  else die "remote '$1' is $cur, expected $2; fix it by hand"; fi
+}
+
+# ---------------------------------------------------------------- check
+check_identities() {
+  local o b s
+  o=$(login_of gh_owner); b=$(login_of gh_bot); s=$(ssh_greets)
+  [[ $o == "$AG_OWNER" ]] && ok "gh (default) is $o" || bad "gh (default) is '${o:-none}', expected $AG_OWNER"
+  [[ $b == "$AG_BOT"   ]] && ok "gh ($AG_GH_DIR) is $b" || bad "gh ($AG_GH_DIR) is '${b:-none}', expected $AG_BOT"
+  [[ $s == "$AG_BOT"   ]] && ok "ssh $AG_ALIAS authenticates as $s" || bad "ssh $AG_ALIAS authenticates as '${s:-nothing}', expected $AG_BOT"
+  if [[ -f $HOME/.ssh/config ]] && awk -v h="$AG_ALIAS" '
+      $1=="Host"{inb=0; for(i=2;i<=NF;i++) if($i==h) inb=1}
+      inb && tolower($1)=="identitiesonly" && tolower($2)=="yes"{f=1} END{exit !f}' "$HOME/.ssh/config"
+  then ok "Host $AG_ALIAS has IdentitiesOnly yes"
+  else bad "Host $AG_ALIAS lacks 'IdentitiesOnly yes': your own agent keys may be offered first"; fi
+}
+check_repo() {
+  local name own bot
+  name=$(repo_name); own="$AG_OWNER/$name"; bot="$AG_BOT/$name"
+  [[ $(git config --get remote.origin.url) == "git@github.com:$own.git" ]] \
+    && ok "origin -> $own" || bad "origin is not git@github.com:$own.git"
+  [[ $(git config --get remote.bot.url) == "git@$AG_ALIAS:$bot.git" ]] \
+    && ok "bot -> $bot via $AG_ALIAS" || bad "bot is not git@$AG_ALIAS:$bot.git"
+  local vis collab parent
+  vis=$(gh_owner api "repos/$own" --jq .private 2>/dev/null || echo "?")
+  collab=$(gh_owner api "repos/$own/collaborators" \
+      --jq "[.[].login | select(. != \"$AG_OWNER\")] | join(\" \")" 2>/dev/null || echo "?")
+  [[ -z $collab ]] && ok "$own has no collaborators besides $AG_OWNER" \
+    || bad "$own collaborators: '$collab' (MUST be none)"
+  parent=$(gh_bot api "repos/$bot" --jq '.parent.full_name // ""' 2>/dev/null || echo "?")
+  case $vis in
+    true)  # private route: independent bot repo, invisible to the bot
+      ok "$own is private (two-repo route)"
+      [[ -z $parent ]] && ok "$bot is not a fork" || bad "$bot is a fork of '$parent' (private route needs an independent repo)"
+      if gh_bot api "repos/$own" >/dev/null 2>&1; then bad "$AG_BOT can read $own: the gate is open"
+      else ok "$AG_BOT cannot see $own"; fi;;
+    false) # public route: bot fork, changes arrive as pull requests
+      ok "$own is public (fork route)"
+      [[ $parent == "$own" ]] && ok "$bot is a fork of $own" || bad "$bot parent is '${parent:-none}', expected $own";;
+    *) bad "cannot read $own as $AG_OWNER";;
+  esac
+}
+cmd_check() {
+  need git gh ssh; load_conf; FAILS=0
+  echo "identities"; check_identities
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo "repo"; check_repo; fi
+  ((FAILS==0)) && echo "gate: closed" || { echo "gate: $FAILS problem(s)"; exit 1; }
+}
+
+# ---------------------------------------------------------------- review / land
+fetch_branch() {
+  git fetch -q bot
+  git rev-parse --verify -q "bot/$1" >/dev/null || die "no branch bot/$1"
+}
+cmd_review() {
+  [[ $# -eq 1 ]] || die "usage: agent-gate review BRANCH"
+  load_conf; fetch_branch "$1"
+  echo "commits (main..bot/$1):"; git log --oneline "main..bot/$1"
+  echo; git diff --stat "main...bot/$1"
+  echo; say "full diff: git diff main...bot/$1"
+}
+cmd_land() {
+  local br="" msg="" keep=0
+  while (($#)); do case $1 in
+    -m) msg=$2; shift 2;; --keep) keep=1; shift;;
+    -*) die "land: unknown option $1";; *) br=$1; shift;; esac; done
+  [[ -n $br ]] || die "usage: agent-gate land BRANCH [-m MSG] [--keep]"
+  load_conf
+  [[ $(git symbolic-ref --short HEAD) == main ]] || die "check out main first"
+  [[ -z $(git status --porcelain --untracked-files=no) ]] || die "working tree not clean"
+  git fetch -q origin
+  [[ $(git rev-parse main) == $(git rev-parse origin/main) ]] || die "main differs from origin/main; sync first"
+  fetch_branch "$br"
+  git log --oneline "main..bot/$br"
+  ask "merge these into main?" || die "aborted"
+  git merge --no-ff --no-commit "bot/$br" || die "conflict: resolve, or 'git merge --abort'"
+  if [[ -n ${AG_TEST_CMD:-} ]]; then
+    say "running: $AG_TEST_CMD"
+    if ! bash -c "$AG_TEST_CMD"; then git merge --abort; die "tests failed; merge aborted"; fi
+  fi
+  git commit -q -m "${msg:-Merge $br}"
+  git push origin main && git push bot main
+  ((keep)) || git push -q bot --delete "$br"
+  ok "landed $br"
+}
+
+cmd_env() { load_conf; echo "export GH_CONFIG_DIR=$AG_GH_DIR"; }
+
+case ${1:-} in
+  setup)  shift; cmd_setup "$@";;
+  repo)   shift; cmd_repo "$@";;
+  check)  shift; cmd_check "$@";;
+  review) shift; cmd_review "$@";;
+  land)   shift; cmd_land "$@";;
+  env)    shift; cmd_env "$@";;
+  -V|--version) echo "$VERSION";;
+  ""|-h|--help|help) usage;;
+  *) die "unknown command '$1' (see --help)";;
+esac
