@@ -225,6 +225,14 @@ check_repo() {
         || bad "$bot is not a fork of $own (parent: '${parent:-none}')";;
     *) bad "cannot read $own as $AG_OWNER";;
   esac
+  # Invariant 6: the bot's main mirrors the owner's, so agent branches start from current code.
+  local mo mb
+  mo=$(q git ls-remote origin refs/heads/main); mo=${mo%%[[:space:]]*}
+  mb=$(q git ls-remote bot refs/heads/main);    mb=${mb%%[[:space:]]*}
+  if [[ $mo == "?" || $mb == "?" || -z $mo || -z $mb ]]; then
+    bad "cannot compare main on origin (${mo:-none}) and bot (${mb:-none})"
+  elif [[ $mo == "$mb" ]]; then ok "bot main mirrors origin main (${mo:0:7})"
+  else bad "bot main (${mb:0:7}) differs from origin main (${mo:0:7}): run 'git push bot main'"; fi
 }
 cmd_check() {
   need git gh ssh; load_conf; FAILS=0
@@ -234,9 +242,13 @@ cmd_check() {
 }
 
 # ---------------------------------------------------------------- review / land
+# Owner/repo a remote points at, for messages: git@host:o/r.git -> o/r
+remote_slug() { local u; u=$(git config --get "remote.$1.url" || true); u=${u%.git}; u=${u##*:}; echo "${u:-unset}"; }
 fetch_branch() {
+  git config --get remote.bot.url >/dev/null || die "no remote 'bot' in this repository ($(repo_name)); see 'agent-gate repo'"
   git fetch -q bot
-  git rev-parse --verify -q "bot/$1" >/dev/null || die "no branch bot/$1"
+  git rev-parse --verify -q "bot/$1" >/dev/null \
+    || die "no branch '$1' on remote bot ($(remote_slug bot)); wrong repository?"
 }
 cmd_review() {
   [[ $# -eq 1 ]] || die "usage: agent-gate review BRANCH"
