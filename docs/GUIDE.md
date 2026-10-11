@@ -160,8 +160,10 @@ agent-gate land <branch> -m "..."   # merge --no-ff --no-commit, AG_TEST_CMD, co
 Set `AG_TEST_CMD` in `~/.config/agent-gate/config` to run your tests on the merge result before it
 is committed; if they fail, the merge is aborted.
 
-**Public route.** The agent can open a pull request from `<bot>:<branch>` to `<owner>:main`;
-review and merge it on GitHub, then `git pull` and `git push bot main` to keep the fork's `main`
+**Public route.** The agent pushes `<branch>` to its fork; a pull request from `<bot>:<branch>` to
+`<owner>:main` is then opened, either by the agent where its platform allows it, or by you from
+GitHub's compare page (`https://github.com/<owner>/<repo>/compare/main...<bot>:<repo>:<branch>`).
+Review and merge it on GitHub, then `git pull` and `git push bot main` to keep the fork's `main`
 current. `agent-gate land` works on the public route too, if you prefer merging locally.
 
 **Partial acceptance.** Cherry-pick the commits you want, or revert the ones you don't before
@@ -194,11 +196,11 @@ Code, `CLAUDE.md` at the root):
 - **An empty repository can't be forked** (public route): push a first commit as the owner.
 - **A 404 is ambiguous.** Holding bot credentials, your private repository answers 404 whether or
   not it exists. That means the gate is working; it doesn't tell you whether the repository exists.
-- **GraphQL is blocked in Claude Code cloud sessions**; REST through `gh api` works. The private route
-  needs neither, because review happens in git; its two repositories are deliberately not one fork
-  network, so cross-repository pull requests aren't available there. On the public route, an agent
-  opening a pull request MUST use the REST endpoint (`gh api repos/<owner>/<repo>/pulls`), not
-  `gh pr create`.
+- **Claude Code cloud sessions can push to the fork but can't open the pull request.** The
+  session's GitHub proxy scopes API calls to repositories attached with push access, and the owner
+  repository is deliberately not one of them. Opening the PR is your one click on the compare page.
+  The private route needs no pull requests at all: review happens in git, and its two repositories
+  are deliberately not one fork network.
 - **URL rewriting.** `git remote get-url` applies `insteadOf` rules; `agent-gate check` reads the
   raw `remote.<name>.url`.
 
