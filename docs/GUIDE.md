@@ -52,9 +52,9 @@ flow, and it keeps the same guarantee: the bot writes only to its fork, and only
 6. The bot repository's `main` is a **mirror**. Only the owner updates it, by pushing `main` after
    each merge, so the next branch starts from current code.
 
-`agent-gate check` verifies 1; the identities behind 3; and, per route, the visible part of 2
-(private: the bot cannot read the owner repository and its repository is not a fork; public: the bot
-repository is a fork of the owner repository).
+`agent-gate check` verifies 1; the identities behind 3; per route, the visible part of 2 (private:
+the bot cannot read the owner repository and its repository is not a fork; public: the bot
+repository is a fork of the owner repository); and 6 (the bot's `main` matches yours).
 
 ## 3 When to use what
 
