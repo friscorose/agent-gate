@@ -29,6 +29,9 @@ agent-gate check                                # verify identities and gate inv
 ```
 
 To upgrade later: `agent-gate update` fast-forwards the clone you installed from and reinstalls.
+`install` also sets up bash tab completion (subcommands, options, and the bot's branch names for
+`review`/`land`); it loads in new shells if bash-completion is installed, or add
+`eval "$(agent-gate completion)"` to `~/.bashrc`.
 
 Then connect your agent **as the bot**. For Claude Code cloud sessions:
 

@@ -46,6 +46,9 @@ in that shell, 'claude' then '/web-setup'.
         and remember the clone for 'update'.
   agent-gate update
         Fast-forward the remembered clone from its origin and reinstall.
+  agent-gate completion
+        Print bash tab completion (install also writes it where bash-completion
+        finds it). Manual use: eval "$(agent-gate completion)" in ~/.bashrc.
 EOF
 }
 
@@ -322,6 +325,8 @@ cmd_install() {
   install -d -m 700 "$CONF_DIR" && printf '%s\n' "$src" >"$SRC_FILE"
   ok "installed $dest/agent-gate ($(git -C "$src" describe --always --dirty))"
   ok "update source: $src"
+  install -d "$COMP_DIR" && "$self" completion >"$COMP_DIR/agent-gate" \
+    && ok "bash completion: $COMP_DIR/agent-gate (loaded by bash-completion in new shells)"
   case ":$PATH:" in *":$dest:"*) ;; *) say "note: $dest is not on PATH";; esac
 }
 cmd_update() {
@@ -338,6 +343,38 @@ cmd_update() {
   "$src/agent-gate" install "$(dirname "$(command -v agent-gate || echo "$HOME/.local/bin/agent-gate")")"
 }
 
+# ---------------------------------------------------------------- completion
+COMP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+cmd_completion() {
+  cat <<'EOF'
+# bash completion for agent-gate. Branch names come from the local refs/remotes/bot/*
+# (current as of the last fetch; 'agent-gate review' fetches). No network on <Tab>.
+_agent_gate() {
+  local cur=${COMP_WORDS[COMP_CWORD]} cmd=${COMP_WORDS[1]:-}
+  if ((COMP_CWORD == 1)); then
+    COMPREPLY=($(compgen -W "setup repo check review land env install update completion help --version" -- "$cur"))
+    return
+  fi
+  case $cmd in
+    review|land)
+      case $cur in
+        -*) if [[ $cmd == review ]]; then COMPREPLY=($(compgen -W "-p --by-commit --" -- "$cur"))
+            else COMPREPLY=($(compgen -W "-m --keep" -- "$cur")); fi;;
+        *)  local w; for w in "${COMP_WORDS[@]:2:COMP_CWORD-2}"; do
+              [[ $w == -- ]] && { COMPREPLY=($(compgen -f -- "$cur")); return; }
+            done
+            COMPREPLY=($(compgen -W "$(git for-each-ref --format='%(refname:strip=3)' \
+                refs/remotes/bot/ 2>/dev/null | grep -vxE 'HEAD|main')" -- "$cur"));;
+      esac;;
+    setup)   COMPREPLY=($(compgen -W "--owner --bot --alias --key" -- "$cur"));;
+    repo)    COMPREPLY=($(compgen -W "--public" -- "$cur"));;
+    install) COMPREPLY=($(compgen -d -- "$cur"));;
+  esac
+}
+complete -F _agent_gate agent-gate
+EOF
+}
+
 cmd_env() { load_conf; echo "export GH_CONFIG_DIR=$AG_GH_DIR"; }
 
 case ${1:-} in
@@ -349,6 +386,7 @@ case ${1:-} in
   env)    shift; cmd_env "$@";;
   install) shift; cmd_install "$@";;
   update)  shift; cmd_update "$@";;
+  completion) shift; cmd_completion "$@";;
   -V|--version) echo "$VERSION";;
   ""|-h|--help|help) usage;;
   *) die "unknown command '$1' (see --help)";;
