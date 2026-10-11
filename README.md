@@ -38,7 +38,7 @@ claude                         # then run /web-setup inside it
 Start agent sessions from `<bot>/<repo>`. When an agent has pushed a branch:
 
 ```sh
-agent-gate review <branch>  # commits and diffstat
+agent-gate review <branch>  # commits and diffstat; -p full diff, --by-commit per commit
 agent-gate land <branch>    # merge --no-ff, optional tests, push to both, delete the branch
 ```
 

@@ -29,8 +29,10 @@ agent-gate $VERSION — agents push branches to a bot repo; only you merge into 
         'bot', pushes main.
   agent-gate check
         Verify identities, the SSH alias and, inside a repo, remotes and gate invariants.
-  agent-gate review BRANCH
-        Fetch the bot repo and show what BRANCH would bring into main.
+  agent-gate review BRANCH [-p | --by-commit] [-- PATH...]
+        Fetch the bot repo and show what BRANCH would bring into main: commits and
+        diffstat; -p adds the full diff, --by-commit shows each commit with its diff.
+        PATHs limit the output to those files or directories.
   agent-gate land BRANCH [-m MSG] [--keep]
         Merge bot/BRANCH into main (--no-ff), run AG_TEST_CMD if configured,
         push main to origin and bot, delete the bot branch unless --keep.
@@ -251,11 +253,24 @@ fetch_branch() {
     || die "no branch '$1' on remote bot ($(remote_slug bot)); wrong repository?"
 }
 cmd_review() {
-  [[ $# -eq 1 ]] || die "usage: agent-gate review BRANCH"
-  load_conf; fetch_branch "$1"
-  echo "commits (main..bot/$1):"; git log --oneline "main..bot/$1"
-  echo; git diff --stat "main...bot/$1"
-  echo; say "full diff: git diff main...bot/$1"
+  local br="" mode=stat; local -a paths=()
+  while (($#)); do case $1 in
+    -p|--patch) mode=patch; shift;; --by-commit) mode=commits; shift;;
+    --) shift; paths=("$@"); break;;
+    -*) die "review: unknown option $1";;
+    *) [[ -z $br ]] || die "review: one branch at a time"; br=$1; shift;; esac; done
+  [[ -n $br ]] || die "usage: agent-gate review BRANCH [-p | --by-commit] [-- PATH...]"
+  load_conf; fetch_branch "$br"
+  local range="main...bot/$br"
+  # ${paths[@]+...}: bash 3.2 treats an empty array as unset under 'set -u'.
+  case $mode in
+    stat)
+      echo "commits (main..bot/$br):"; git log --oneline "main..bot/$br" -- ${paths[@]+"${paths[@]}"}
+      echo; git diff --stat "$range" -- ${paths[@]+"${paths[@]}"}
+      echo; say "full diff: agent-gate review $br -p   (per commit: --by-commit)";;
+    patch)   git diff --stat --patch "$range" -- ${paths[@]+"${paths[@]}"};;
+    commits) git log --reverse --stat --patch "main..bot/$br" -- ${paths[@]+"${paths[@]}"};;
+  esac
 }
 cmd_land() {
   local br="" msg="" keep=0

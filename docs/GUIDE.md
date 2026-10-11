@@ -152,7 +152,8 @@ repositories, which is the point.
 
 ```sh
 agent-gate review <branch>          # git fetch bot; git log main..bot/<branch>; diffstat
-git diff main...bot/<branch>        # read the change
+agent-gate review <branch> -p       # the full diff (through your pager); add -- PATH... to narrow
+agent-gate review <branch> --by-commit   # each commit with its own diff, oldest first
 agent-gate land <branch> -m "..."   # merge --no-ff --no-commit, AG_TEST_CMD, commit,
                                     # push origin main, push bot main, delete bot/<branch>
 ```
