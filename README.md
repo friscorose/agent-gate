@@ -17,7 +17,8 @@ your merge is the review.
 
 ## Quick start
 
-Needs `git`, `gh` (GitHub CLI) and OpenSSH. Create a second GitHub account for the bot first.
+Needs bash 3.2+ (the script's interpreter; your login shell can be anything), `git`, `gh`
+(GitHub CLI) and OpenSSH. Create a second GitHub account for the bot first.
 
 ```sh
 install -m 755 agent-gate ~/.local/bin/        # or anywhere on PATH

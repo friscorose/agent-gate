@@ -94,6 +94,17 @@ Host <alias>
 yours signs, the push authenticates **as you**. Add the public key to the bot account. Check:
 `ssh -T <alias>` prints `Hi <bot>!`.
 
+`IdentitiesOnly` is not enough on its own: `IdentityFile` **accumulates** across every matching
+`Host` block. A `Host *` block with `IdentityFile ~/.ssh/id_ed25519` still offers your key to the
+alias, and your agent signs with it, behind a confirmation prompt if you use `ssh-add -c`.
+Exclude the alias there:
+```
+Host * !<alias>
+    IdentityFile ~/.ssh/id_ed25519
+```
+Check the effective settings with `ssh -G <alias> | grep -E '^identit'`: one `identityfile` line,
+the bot's key, and `identitiesonly yes`. `agent-gate check` tests exactly this.
+
 **4.3 Separate `gh` login for the bot:**
 ```sh
 GH_CONFIG_DIR=~/.config/gh-<bot> gh auth login -h github.com -p ssh --skip-ssh-key \
@@ -149,8 +160,10 @@ agent-gate land <branch> -m "..."   # merge --no-ff --no-commit, AG_TEST_CMD, co
 Set `AG_TEST_CMD` in `~/.config/agent-gate/config` to run your tests on the merge result before it
 is committed; if they fail, the merge is aborted.
 
-**Public route.** The agent can open a pull request from `<bot>:<branch>` to `<owner>:main`;
-review and merge it on GitHub, then `git pull` and `git push bot main` to keep the fork's `main`
+**Public route.** The agent pushes `<branch>` to its fork; a pull request from `<bot>:<branch>` to
+`<owner>:main` is then opened, either by the agent where its platform allows it, or by you from
+GitHub's compare page (`https://github.com/<owner>/<repo>/compare/main...<bot>:<repo>:<branch>`).
+Review and merge it on GitHub, then `git pull` and `git push bot main` to keep the fork's `main`
 current. `agent-gate land` works on the public route too, if you prefer merging locally.
 
 **Partial acceptance.** Cherry-pick the commits you want, or revert the ones you don't before
@@ -176,15 +189,18 @@ Code, `CLAUDE.md` at the root):
 
 - **Shared keyring** across `gh` config dirs → wrong identity (§4.3).
 - **SSH agent keys offered first** → possible push as you (§4.2).
+- **`IdentityFile` accumulates** across matching `Host` blocks, so a `Host *` key reaches the alias
+  despite `IdentitiesOnly` (§4.2). An agent confirmation prompt (`ssh-add -c`) is a backstop, not
+  a fix: accepting one prompt pushes as you.
 - **Same-named repositories** can't share a Claude Code cloud session (§3).
 - **An empty repository can't be forked** (public route): push a first commit as the owner.
 - **A 404 is ambiguous.** Holding bot credentials, your private repository answers 404 whether or
   not it exists. That means the gate is working; it doesn't tell you whether the repository exists.
-- **GraphQL is blocked in Claude Code cloud sessions**; REST through `gh api` works. The private route
-  needs neither, because review happens in git; its two repositories are deliberately not one fork
-  network, so cross-repository pull requests aren't available there. On the public route, an agent
-  opening a pull request MUST use the REST endpoint (`gh api repos/<owner>/<repo>/pulls`), not
-  `gh pr create`.
+- **Claude Code cloud sessions can push to the fork but can't open the pull request.** The
+  session's GitHub proxy scopes API calls to repositories attached with push access, and the owner
+  repository is deliberately not one of them. Opening the PR is your one click on the compare page.
+  The private route needs no pull requests at all: review happens in git, and its two repositories
+  are deliberately not one fork network.
 - **URL rewriting.** `git remote get-url` applies `insteadOf` rules; `agent-gate check` reads the
   raw `remote.<name>.url`.
 
