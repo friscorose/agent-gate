@@ -21,12 +21,14 @@ Needs bash 3.2+ (the script's interpreter; your login shell can be anything), `g
 (GitHub CLI) and OpenSSH. Create a second GitHub account for the bot first.
 
 ```sh
-install -m 755 agent-gate ~/.local/bin/        # or anywhere on PATH
+./agent-gate install                           # from your clone: copies to ~/.local/bin
 agent-gate setup --owner <you> --bot <bot>     # SSH key + alias, separate gh login for the bot
 cd your-project
 agent-gate repo                                 # private <you>/<repo> + <bot>/<repo>, remotes, push
 agent-gate check                                # verify identities and gate invariants
 ```
+
+To upgrade later: `agent-gate update` fast-forwards the clone you installed from and reinstalls.
 
 Then connect your agent **as the bot**. For Claude Code cloud sessions:
 
