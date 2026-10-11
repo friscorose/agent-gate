@@ -288,7 +288,14 @@ cmd_land() {
   [[ $(git symbolic-ref --short HEAD) == main ]] || die "check out main first"
   [[ -z $(git status --porcelain --untracked-files=no) ]] || die "working tree not clean"
   git fetch -q origin
-  [[ $(git rev-parse main) == $(git rev-parse origin/main) ]] || die "main differs from origin/main; sync first"
+  if [[ $(git rev-parse main) != $(git rev-parse origin/main) ]]; then
+    local ahead behind hint
+    ahead=$(git rev-list --count origin/main..main); behind=$(git rev-list --count main..origin/main)
+    if ((behind == 0)); then hint="unpushed local commits: 'git log origin/main..main', then 'git push origin main && git push bot main'"
+    elif ((ahead == 0)); then hint="'git pull --ff-only origin main'"
+    else hint="diverged: inspect 'git log --oneline --graph main origin/main' and reconcile by hand"; fi
+    die "main is $ahead ahead, $behind behind origin/main; $hint"
+  fi
   fetch_branch "$br"
   git log --oneline "main..bot/$br"
   ask "merge these into main?" || die "aborted"
