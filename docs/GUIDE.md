@@ -94,6 +94,17 @@ Host <alias>
 yours signs, the push authenticates **as you**. Add the public key to the bot account. Check:
 `ssh -T <alias>` prints `Hi <bot>!`.
 
+`IdentitiesOnly` is not enough on its own: `IdentityFile` **accumulates** across every matching
+`Host` block. A `Host *` block with `IdentityFile ~/.ssh/id_ed25519` still offers your key to the
+alias, and your agent signs with it, behind a confirmation prompt if you use `ssh-add -c`.
+Exclude the alias there:
+```
+Host * !<alias>
+    IdentityFile ~/.ssh/id_ed25519
+```
+Check the effective settings with `ssh -G <alias> | grep -E '^identit'`: one `identityfile` line,
+the bot's key, and `identitiesonly yes`. `agent-gate check` tests exactly this.
+
 **4.3 Separate `gh` login for the bot:**
 ```sh
 GH_CONFIG_DIR=~/.config/gh-<bot> gh auth login -h github.com -p ssh --skip-ssh-key \
@@ -176,6 +187,9 @@ Code, `CLAUDE.md` at the root):
 
 - **Shared keyring** across `gh` config dirs → wrong identity (§4.3).
 - **SSH agent keys offered first** → possible push as you (§4.2).
+- **`IdentityFile` accumulates** across matching `Host` blocks, so a `Host *` key reaches the alias
+  despite `IdentitiesOnly` (§4.2). An agent confirmation prompt (`ssh-add -c`) is a backstop, not
+  a fix: accepting one prompt pushes as you.
 - **Same-named repositories** can't share a Claude Code cloud session (§3).
 - **An empty repository can't be forked** (public route): push a first commit as the owner.
 - **A 404 is ambiguous.** Holding bot credentials, your private repository answers 404 whether or

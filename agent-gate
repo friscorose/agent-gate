@@ -49,7 +49,10 @@ load_conf() {
 }
 gh_owner() { env -u GH_CONFIG_DIR gh "$@"; }
 gh_bot()   { GH_CONFIG_DIR="$AG_GH_DIR" gh "$@"; }
-login_of() { "$1" api user --jq .login 2>/dev/null || true; }
+# q CMD...: stdout of CMD on success, '?' on failure. gh writes its error JSON to stdout,
+# so '|| echo' after a substitution would append to it rather than replace it.
+q() { local out; out=$("$@" 2>/dev/null) || { echo "?"; return 0; }; printf '%s\n' "$out"; }
+login_of() { q "$1" api user --jq .login; }
 ssh_greets() { { ssh -T -o BatchMode=yes "$AG_ALIAS" 2>&1 || true; } | sed -n 's/^Hi \([^!]*\)!.*/\1/p' | head -1; }
 # Repo name: from origin's URL when set (the local directory may be named differently).
 repo_name() {
@@ -79,10 +82,12 @@ cmd_setup() {
   if [[ -f $sshc ]] && grep -Eq "^[[:space:]]*Host[[:space:]]+(.*[[:space:]])?$alias([[:space:]]|\$)" "$sshc"; then
     say "Host $alias already in $sshc; leaving it. It MUST contain 'IdentitiesOnly yes'."
   else
-    [[ -f $sshc ]] && cp -p "$sshc" "$sshc.agent-gate.bak"
     install -d -m 700 "$HOME/.ssh"
-    cat >>"$sshc" <<EOF
-
+    local had=0
+    if [[ -f $sshc ]]; then cp -p "$sshc" "$sshc.agent-gate.bak"; had=1; fi
+    # Prepend: first match wins for most options. IdentityFile still accumulates, so a
+    # 'Host *' IdentityFile needs '!<alias>' added there; 'agent-gate check' reports it.
+    { cat <<EOF
 # agent-gate: bot identity. IdentitiesOnly stops ssh-agent keys (yours) being offered first.
 Host $alias
     User git
@@ -90,8 +95,11 @@ Host $alias
     IdentityFile $key
     IdentitiesOnly yes
     ForwardX11 no
+
 EOF
-    chmod 600 "$sshc"; say "appended (backup: $sshc.agent-gate.bak if a config existed)"
+      if ((had)); then cat "$sshc.agent-gate.bak"; fi
+    } >"$sshc.agent-gate.new" && mv "$sshc.agent-gate.new" "$sshc"
+    chmod 600 "$sshc"; say "added at the top (backup: $sshc.agent-gate.bak if a config existed)"
   fi
 
   echo "3/5 gh login for the BOT ($bot) in $ghdir"
@@ -167,12 +175,24 @@ check_identities() {
   o=$(login_of gh_owner); b=$(login_of gh_bot); s=$(ssh_greets)
   [[ $o == "$AG_OWNER" ]] && ok "gh (default) is $o" || bad "gh (default) is '${o:-none}', expected $AG_OWNER"
   [[ $b == "$AG_BOT"   ]] && ok "gh ($AG_GH_DIR) is $b" || bad "gh ($AG_GH_DIR) is '${b:-none}', expected $AG_BOT"
-  [[ $s == "$AG_BOT"   ]] && ok "ssh $AG_ALIAS authenticates as $s" || bad "ssh $AG_ALIAS authenticates as '${s:-nothing}', expected $AG_BOT"
-  if [[ -f $HOME/.ssh/config ]] && awk -v h="$AG_ALIAS" '
-      $1=="Host"{inb=0; for(i=2;i<=NF;i++) if($i==h) inb=1}
-      inb && tolower($1)=="identitiesonly" && tolower($2)=="yes"{f=1} END{exit !f}' "$HOME/.ssh/config"
-  then ok "Host $AG_ALIAS has IdentitiesOnly yes"
-  else bad "Host $AG_ALIAS lacks 'IdentitiesOnly yes': your own agent keys may be offered first"; fi
+  if [[ $s == "$AG_BOT" ]]; then ok "ssh $AG_ALIAS authenticates as $s"
+  elif [[ $s == "$AG_OWNER" ]]; then bad "ssh $AG_ALIAS authenticates as $s, YOUR account: an ssh-agent key was used instead of $AG_KEY"
+  else bad "ssh $AG_ALIAS authenticates as '${s:-nothing}', expected $AG_BOT"; fi
+  # Effective config, not the file: IdentityFile accumulates across every matching Host
+  # block, so a 'Host *' IdentityFile is offered to the alias too, IdentitiesOnly or not.
+  local eff only files extra="" f
+  eff=$(ssh -G "$AG_ALIAS" 2>/dev/null || true)
+  only=$(awk '$1=="identitiesonly"{print $2}' <<<"$eff")
+  [[ $only == yes ]] && ok "$AG_ALIAS: IdentitiesOnly yes" \
+    || bad "$AG_ALIAS: IdentitiesOnly is '${only:-unset}': ssh-agent keys may be offered first"
+  files=$(awk '$1=="identityfile"{print $2}' <<<"$eff")
+  while IFS= read -r f; do
+    [[ -z $f ]] && continue
+    f=${f/#\~/$HOME}
+    [[ $f == "$AG_KEY" ]] || extra="$extra $f"
+  done <<<"$files"
+  [[ -z $extra ]] && ok "$AG_ALIAS offers only $AG_KEY" \
+    || bad "$AG_ALIAS also offers:$extra (from another matching Host block, e.g. 'Host *'; exclude the alias there: 'Host * !$AG_ALIAS')"
 }
 check_repo() {
   local name own bot
@@ -180,23 +200,29 @@ check_repo() {
   [[ $(git config --get remote.origin.url) == "git@github.com:$own.git" ]] \
     && ok "origin -> $own" || bad "origin is not git@github.com:$own.git"
   [[ $(git config --get remote.bot.url) == "git@$AG_ALIAS:$bot.git" ]] \
-    && ok "bot -> $bot via $AG_ALIAS" || bad "bot is not git@$AG_ALIAS:$bot.git"
+    && ok "bot -> $bot via $AG_ALIAS" \
+    || bad "remote 'bot' is '$(git config --get remote.bot.url || echo unset)', expected git@$AG_ALIAS:$bot.git"
   local vis collab parent
-  vis=$(gh_owner api "repos/$own" --jq .private 2>/dev/null || echo "?")
-  collab=$(gh_owner api "repos/$own/collaborators" \
-      --jq "[.[].login | select(. != \"$AG_OWNER\")] | join(\" \")" 2>/dev/null || echo "?")
+  vis=$(q gh_owner api "repos/$own" --jq .private)
+  collab=$(q gh_owner api "repos/$own/collaborators" \
+      --jq "[.[].login | select(. != \"$AG_OWNER\")] | join(\" \")")
   [[ -z $collab ]] && ok "$own has no collaborators besides $AG_OWNER" \
     || bad "$own collaborators: '$collab' (MUST be none)"
-  parent=$(gh_bot api "repos/$bot" --jq '.parent.full_name // ""' 2>/dev/null || echo "?")
+  parent=$(q gh_bot api "repos/$bot" --jq '.parent.full_name // ""')
+  if [[ $parent == "?" ]]; then
+    bad "cannot read $bot as $AG_BOT (not created yet? run 'agent-gate repo', with --public for the fork route)"
+    parent=""; local nobot=1
+  fi
   case $vis in
     true)  # private route: independent bot repo, invisible to the bot
       ok "$own is private (two-repo route)"
-      [[ -z $parent ]] && ok "$bot is not a fork" || bad "$bot is a fork of '$parent' (private route needs an independent repo)"
+      [[ -n ${nobot:-} ]] || { [[ -z $parent ]] && ok "$bot is not a fork"; } || bad "$bot is a fork of '$parent' (private route needs an independent repo)"
       if gh_bot api "repos/$own" >/dev/null 2>&1; then bad "$AG_BOT can read $own: the gate is open"
       else ok "$AG_BOT cannot see $own"; fi;;
     false) # public route: bot fork, changes arrive as pull requests
       ok "$own is public (fork route)"
-      [[ $parent == "$own" ]] && ok "$bot is a fork of $own" || bad "$bot parent is '${parent:-none}', expected $own";;
+      [[ -n ${nobot:-} ]] || { [[ $parent == "$own" ]] && ok "$bot is a fork of $own"; } \
+        || bad "$bot is not a fork of $own (parent: '${parent:-none}')";;
     *) bad "cannot read $own as $AG_OWNER";;
   esac
 }
