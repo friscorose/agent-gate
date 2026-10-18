@@ -47,8 +47,9 @@ in that shell, 'claude' then '/web-setup'.
   agent-gate update
         Fast-forward the remembered clone from its origin and reinstall.
   agent-gate completion
-        Print bash tab completion (install also writes it where bash-completion
-        finds it). Manual use: eval "$(agent-gate completion)" in ~/.bashrc.
+        Print the line that enables bash tab completion; the completion itself is
+        built into this script (install also writes the line where bash-completion
+        finds it). Manual use: eval "\$(agent-gate completion)" in ~/.bashrc.
 EOF
 }
 
@@ -344,38 +345,45 @@ cmd_update() {
 }
 
 # ---------------------------------------------------------------- completion
+# Built in, as a self-completing command: 'complete -C agent-gate agent-gate' makes bash run this
+# script with COMP_LINE/COMP_POINT set, and it prints one candidate per line. The logic ships with
+# the script, so an installed copy can never disagree with its own completion.
+# Branch names come from the local refs/remotes/bot/* (current as of the last fetch; 'agent-gate
+# review' fetches). No network on <Tab>.
 COMP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
 cmd_completion() {
-  cat <<'EOF'
-# bash completion for agent-gate. Branch names come from the local refs/remotes/bot/*
-# (current as of the last fetch; 'agent-gate review' fetches). No network on <Tab>.
-_agent_gate() {
-  local cur=${COMP_WORDS[COMP_CWORD]} cmd=${COMP_WORDS[1]:-}
-  if ((COMP_CWORD == 1)); then
-    COMPREPLY=($(compgen -W "setup repo check review land env install update completion help --version" -- "$cur"))
-    return
+  echo "complete -C agent-gate agent-gate"
+}
+cmd_complete() {   # args as bash passes them to a -C completer: COMMAND WORD PREVIOUS
+  local line=${COMP_LINE:0:COMP_POINT}; local -a w
+  read -ra w <<<"$line"
+  [[ -z $line || $line == *[[:space:]] ]] && w+=("")
+  local n=$((${#w[@]} - 1)); local cur=${2-${w[n]}} cmd=${w[1]:-}
+  if ((n <= 1)); then
+    compgen -W "setup repo check review land env install update completion help --version" -- "$cur"
+    return 0
   fi
   case $cmd in
     review|land)
       case $cur in
-        -*) if [[ $cmd == review ]]; then COMPREPLY=($(compgen -W "-p --by-commit --" -- "$cur"))
-            else COMPREPLY=($(compgen -W "-m --keep" -- "$cur")); fi;;
-        *)  local w; for w in "${COMP_WORDS[@]:2:COMP_CWORD-2}"; do
-              [[ $w == -- ]] && { COMPREPLY=($(compgen -f -- "$cur")); return; }
+        -*) if [[ $cmd == review ]]; then compgen -W "-p --by-commit --" -- "$cur"
+            else compgen -W "-m --keep" -- "$cur"; fi;;
+        *)  local x; for x in "${w[@]:2:n-2}"; do
+              [[ $x == -- ]] && { compgen -f -- "$cur"; return 0; }
             done
-            COMPREPLY=($(compgen -W "$(git for-each-ref --format='%(refname:strip=3)' \
-                refs/remotes/bot/ 2>/dev/null | grep -vxE 'HEAD|main')" -- "$cur"));;
+            compgen -W "$(git for-each-ref --format='%(refname:strip=3)' \
+                refs/remotes/bot/ 2>/dev/null | grep -vxE 'HEAD|main')" -- "$cur";;
       esac;;
-    setup)   COMPREPLY=($(compgen -W "--owner --bot --alias --key" -- "$cur"));;
-    repo)    COMPREPLY=($(compgen -W "--public" -- "$cur"));;
-    install) COMPREPLY=($(compgen -d -- "$cur"));;
+    setup)   compgen -W "--owner --bot --alias --key" -- "$cur";;
+    repo)    compgen -W "--public" -- "$cur";;
+    install) compgen -d -- "$cur";;
   esac
-}
-complete -F _agent_gate agent-gate
-EOF
+  return 0
 }
 
 cmd_env() { load_conf; echo "export GH_CONFIG_DIR=$AG_GH_DIR"; }
+
+if [[ -n ${COMP_LINE+x} && -n ${COMP_POINT+x} ]]; then cmd_complete "$@" || true; exit 0; fi
 
 case ${1:-} in
   setup)  shift; cmd_setup "$@";;
