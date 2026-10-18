@@ -348,11 +348,28 @@ cmd_update() {
 # Built in, as a self-completing command: 'complete -C agent-gate agent-gate' makes bash run this
 # script with COMP_LINE/COMP_POINT set, and it prints one candidate per line. The logic ships with
 # the script, so an installed copy can never disagree with its own completion.
-# Branch names come from the local refs/remotes/bot/* (current as of the last fetch; 'agent-gate
-# review' fetches). No network on <Tab>.
+# Branch names come from the bot remote itself (bot_branches below), so a branch an agent pushed a
+# minute ago completes without a fetch first.
 COMP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
 cmd_completion() {
   echo "complete -C agent-gate agent-gate"
+}
+# The bot's branches, one per line, main excluded. Asks the remote ('git ls-remote', never a
+# prompt: BatchMode, 3 s connect timeout) and caches the answer in the repository's git dir for
+# 60 s, so a burst of <Tab>s costs one round trip. Unreachable remote: the cache if any, else the
+# local refs/remotes/bot/* as of the last fetch.
+bot_branches() {
+  local gd cache list
+  gd=$(git rev-parse --git-dir 2>/dev/null) || return 0
+  cache=$gd/agent-gate-bot-branches
+  if [[ -z $(find "$cache" -mmin -1 2>/dev/null) ]] && list=$(
+       GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=3" \
+       git ls-remote --heads bot 2>/dev/null); then
+    printf '%s\n' "$list" | sed 's|^.*refs/heads/||' >"$cache.tmp" && mv -f "$cache.tmp" "$cache"
+  fi
+  if [[ -f $cache ]]; then cat "$cache"
+  else git for-each-ref --format='%(refname:strip=3)' refs/remotes/bot/ 2>/dev/null; fi \
+    | grep -vxE 'HEAD|main' || true
 }
 cmd_complete() {   # args as bash passes them to a -C completer: COMMAND WORD PREVIOUS
   local line=${COMP_LINE:0:COMP_POINT}; local -a w
@@ -371,8 +388,7 @@ cmd_complete() {   # args as bash passes them to a -C completer: COMMAND WORD PR
         *)  local x; for x in "${w[@]:2:n-2}"; do
               [[ $x == -- ]] && { compgen -f -- "$cur"; return 0; }
             done
-            compgen -W "$(git for-each-ref --format='%(refname:strip=3)' \
-                refs/remotes/bot/ 2>/dev/null | grep -vxE 'HEAD|main')" -- "$cur";;
+            compgen -W "$(bot_branches)" -- "$cur";;
       esac;;
     setup)   compgen -W "--owner --bot --alias --key" -- "$cur";;
     repo)    compgen -W "--public" -- "$cur";;
